@@ -10,13 +10,13 @@
 #define SCREEN_HEIGHT 64
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-// Pin Definitions
-#define PIN_LED_GREEN   13  // Green LED anode
-#define PIN_LED_YELLOW  12  // Yellow LED anode
-#define PIN_LED_RED     14  // Red LED anode
-#define PIN_BUZZER      25  // Buzzer positive terminal
-#define PIN_BTN_SOS      5  // Green push button (Manual SOS)
-#define PIN_BTN_MUTE     4  // Blue push button (Buzzer Mute)
+// Pin Definitions (GPIO 12 changed to 26 to avoid strapping pin boot fails)
+#define PIN_LED_GREEN   13
+#define PIN_LED_YELLOW  26  
+#define PIN_LED_RED     14
+#define PIN_BUZZER      25
+#define PIN_BTN_SOS      5
+#define PIN_BTN_MUTE     4
 
 // Wi-Fi & Telegram Configuration
 const char* WIFI_SSID = "Wokwi-GUEST";
@@ -28,14 +28,10 @@ const char* WIFI_PASS = "";
 WiFiClientSecure secured_client;
 UniversalTelegramBot bot(BOT_TOKEN, secured_client);
 
-// Simulated Vital Parameters
-int heartRate = 75;       // BPM
-int spo2 = 98;            // %
-float bodyTemp = 36.8;    // °C
-
-// Dynamic GPS Coordinates
-float currentLat = 28.6139;
-float currentLon = 77.2090;
+// Vitals
+int heartRate = 75;
+int spo2 = 98;
+float bodyTemp = 36.8;
 
 // System States: 0 = NORMAL, 1 = WARNING, 2 = EMERGENCY
 int systemState = 0;
@@ -48,7 +44,6 @@ bool alertAlreadySent = false;
 unsigned long lastTelegramSent = 0;
 const unsigned long telegramCooldown = 30000;
 
-// Function Declarations
 void sendTelegramAlert(const String& reason);
 void simulateSensorReadings();
 void handleNormalState();
@@ -58,7 +53,7 @@ void updateOLED();
 
 void sendTelegramAlert(const String& reason) {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[Telegram] Wi-Fi not connected. Cannot send alert.");
+    Serial.println("[Telegram] Wi-Fi not connected.");
     return;
   }
 
@@ -67,7 +62,7 @@ void sendTelegramAlert(const String& reason) {
   message += "*Heart Rate:* " + String(heartRate) + " BPM\n";
   message += "*SpO2:* " + String(spo2) + " %\n";
   message += "*Body Temp:* " + String(bodyTemp, 1) + " °C\n\n";
-  message += "📍 *Location:* Lat " + String(currentLat, 6) + ", Lon " + String(currentLon, 6) + "\n";
+  message += "📍 *Location:* Lat 28.6139, Lon 77.2090\n";
   message += "🚑 *Action:* Dispatching EMS & Alerting Family.";
 
   Serial.println("[Telegram] Sending emergency message...");
@@ -86,14 +81,13 @@ void setup() {
   pinMode(PIN_LED_RED, OUTPUT);
   pinMode(PIN_BUZZER, OUTPUT);
 
-  // Push buttons using internal pull-up resistors (Active LOW)
   pinMode(PIN_BTN_SOS, INPUT_PULLUP);
   pinMode(PIN_BTN_MUTE, INPUT_PULLUP);
 
   Wire.begin(21, 22);
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("OLED init failed!"));
+    Serial.println(F("[Hardware] OLED init failed! Check connections."));
     for (;;);
   }
 
@@ -108,115 +102,103 @@ void setup() {
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   secured_client.setInsecure();
-
+ 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
     Serial.print(".");
     attempts++;
   }
+  Serial.println();
 
   display.setCursor(10, 40);
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected.");
     display.println("WiFi: Connected");
+    Serial.println("[System] WiFi Connected successfully.");
   } else {
-    Serial.println("\nWiFi connection failed.");
     display.println("WiFi: Offline");
+    Serial.println("[System] WiFi connection timed out.");
   }
   display.display();
-  delay(1500);
+  delay(1200);
 }
 
 void loop() {
-  // Read Blue Button (Mute/Unmute Buzzer)
+  // Mute Button Check
   if (digitalRead(PIN_BTN_MUTE) == LOW) {
     buzzerMuted = !buzzerMuted;
-    
+    Serial.printf("[Button] Mute toggled: %s\n", buzzerMuted ? "MUTED" : "UNMUTED");
     if (buzzerMuted) {
       noTone(PIN_BUZZER);
-      Serial.println("[Audio] Buzzer MUTED.");
-    } else {
-      Serial.println("[Audio] Buzzer UNMUTED.");
-      if (systemState == 2) {
-        tone(PIN_BUZZER, 1000);
-      }
+    } else if (systemState == 2) {
+      tone(PIN_BUZZER, 1000);
     }
-    
     updateOLED();
-    delay(300); // Debounce
+    delay(350);
   }
 
-  // Read Green Button (Manual SOS Toggle)
+  // SOS Toggle Button Check
   if (digitalRead(PIN_BTN_SOS) == LOW) {
     manualSOSActive = !manualSOSActive;
     if (manualSOSActive) {
       systemState = 2;
+      Serial.println("[Button] Manual SOS Activated!");
       handleEmergencyState("Manual Green SOS Button Pressed");
     } else {
       systemState = 0;
       buzzerMuted = false;
       alertAlreadySent = false;
+      Serial.println("[Button] Manual SOS Cleared.");
       handleNormalState();
+      updateOLED();
     }
-    updateOLED();
-    delay(300); // Debounce
+    delay(350);
   }
 
-  // Periodic sensor simulation & evaluation every 2.5 seconds
-  if (millis() - lastUpdate > 2500) {
+  // Periodic sensor cycle
+  if (millis() - lastUpdate > 2000) {
     lastUpdate = millis();
 
-    simulateSensorReadings();
+    if (!manualSOSActive) {
+      simulateSensorReadings();
 
-    // Check emergency thresholds
-    if (manualSOSActive || heartRate > 120 || heartRate < 50 || spo2 < 90 || bodyTemp > 38.5) {
-      systemState = 2;
-      String reason = manualSOSActive ? "Manual Button SOS" : "Critical Vital Sign Deviation";
-      handleEmergencyState(reason);
-    } 
-    // Check warning thresholds
-    else if ((heartRate >= 101 && heartRate <= 120) || (spo2 >= 90 && spo2 <= 94) || (bodyTemp >= 37.6 && bodyTemp <= 38.5)) {
-      systemState = 1;
-      alertAlreadySent = false; 
-      handleWarningState();
-    } 
-    // Normal state
-    else {
-      systemState = 0;
-      alertAlreadySent = false;
-      handleNormalState();
+      if (heartRate > 120 || heartRate < 50 || spo2 < 90 || bodyTemp > 38.5) {
+        systemState = 2;
+        handleEmergencyState("Critical Vital Sign Deviation");
+      } else if ((heartRate >= 101 && heartRate <= 120) || (spo2 >= 90 && spo2 <= 94) || (bodyTemp >= 37.6 && bodyTemp <= 38.5)) {
+        systemState = 1;
+        buzzerMuted = false;
+        alertAlreadySent = false;
+        handleWarningState();
+        updateOLED();
+      } else {
+        systemState = 0;
+        buzzerMuted = false;
+        alertAlreadySent = false;
+        handleNormalState();
+        updateOLED();
+      }
+    } else {
+      handleEmergencyState("Manual Green SOS Button Pressed");
     }
-
-    updateOLED();
   }
 }
 
 void simulateSensorReadings() {
   int scenario = random(0, 10);
-  
-  // 60% chance: Normal vitals (Green LED)
   if (scenario < 6) {
-    heartRate = random(65, 85);
+    heartRate = random(68, 88);
     spo2 = random(96, 100);
-    bodyTemp = 36.5 + (random(0, 7) / 10.0);
-  } 
-  // 20% chance: Warning vitals (Yellow LED)
-  else if (scenario < 8) {
+    bodyTemp = 36.5 + (random(0, 8) / 10.0);
+  } else if (scenario < 8) {
     heartRate = random(102, 118);
     spo2 = random(91, 94);
     bodyTemp = 37.6 + (random(0, 6) / 10.0);
-  } 
-  // 20% chance: Emergency vitals (Red LED)
-  else {
-    heartRate = random(130, 160);
-    spo2 = random(82, 88);
+  } else {
+    heartRate = random(130, 165);
+    spo2 = random(82, 89);
     bodyTemp = 38.8;
   }
-
-  // Dynamically update GPS coordinates
-  currentLat += (random(-50, 51) / 100000.0);
-  currentLon += (random(-50, 51) / 100000.0);
 }
 
 void handleNormalState() {
@@ -224,11 +206,7 @@ void handleNormalState() {
   digitalWrite(PIN_LED_YELLOW, LOW);
   digitalWrite(PIN_LED_RED, LOW);
   noTone(PIN_BUZZER);
-
-  Serial.println("--------------- NORMAL MONITORING ---------------");
-  Serial.printf("Heart Rate: %d BPM | SpO2: %d%% | Temp: %.1f C\n", heartRate, spo2, bodyTemp);
-  Serial.printf("Simulated GPS: Lat %.6f, Lon %.6f\n", currentLat, currentLon);
-  Serial.println("-------------------------------------------------");
+  Serial.printf("[STATE: NORMAL] BPM: %d | SpO2: %d%% | Temp: %.1f C\n", heartRate, spo2, bodyTemp);
 }
 
 void handleWarningState() {
@@ -236,12 +214,7 @@ void handleWarningState() {
   digitalWrite(PIN_LED_YELLOW, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
   noTone(PIN_BUZZER);
-
-  Serial.println("--------------- CAUTION WARNING ---------------");
-  Serial.println("[WARNING] Borderline vitals detected - Monitor closely.");
-  Serial.printf("Heart Rate: %d BPM | SpO2: %d%% | Temp: %.1f C\n", heartRate, spo2, bodyTemp);
-  Serial.printf("Simulated GPS: Lat %.6f, Lon %.6f\n", currentLat, currentLon);
-  Serial.println("-----------------------------------------------");
+  Serial.printf("[STATE: WARNING] BPM: %d | SpO2: %d%% | Temp: %.1f C\n", heartRate, spo2, bodyTemp);
 }
 
 void handleEmergencyState(String reason) {
@@ -255,11 +228,10 @@ void handleEmergencyState(String reason) {
     noTone(PIN_BUZZER);
   }
 
-  Serial.println("================ EMERGENCY ALERT ================");
-  Serial.println("[CRITICAL] Severe Cardiac Abnormality Detected!");
-  Serial.printf("Heart Rate: %d BPM | SpO2: %d%% | Temp: %.1f C\n", heartRate, spo2, bodyTemp);
-  Serial.printf("Simulated GPS: Lat %.6f, Lon %.6f (Transmitted to EMS)\n", currentLat, currentLon);
-  Serial.println("=================================================");
+  Serial.printf("[STATE: EMERGENCY] Reason: %s | BPM: %d | SpO2: %d%% | Temp: %.1f C\n Calling Ambulance\n", 
+                reason.c_str(), heartRate, spo2, bodyTemp);
+
+  updateOLED();
 
   if (!alertAlreadySent || (millis() - lastTelegramSent > telegramCooldown)) {
     sendTelegramAlert(reason);
